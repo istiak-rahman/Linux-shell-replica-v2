@@ -14,8 +14,26 @@ static char* builtin[] = {
     "exit",   /* exits the shell */
     "which",  /* displays full path to command */
     "kill",   /* send signals to specific processes*/
+    "fg",     /* foreground process group*/
+    "bg",     /* background process group*/
+    "jobs",   /* prints all active jobs to stdout*/
     NULL
 };
+
+Job* new_jobs()
+{
+    Job* jobs = malloc(100*sizeof(Job));
+    int i;
+    for (i=0; i<100; i++) {
+        jobs[i].name = NULL;
+        jobs[i].pids = NULL;
+        jobs[i].npids = 0;
+        jobs[i].pgid = 0;
+        jobs[i].status = STOPPED;
+    }
+
+    return jobs;
+}
 
 const char *sigabbrev(unsigned int sig)
 {
@@ -208,5 +226,3 @@ void builtin_execute (Task T, char* infile, char *outfile)
         printf ("pssh: builtin command: %s (not implemented!)\n", T.cmd);
     }
 }
-
-
