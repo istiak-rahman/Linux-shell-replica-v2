@@ -3,6 +3,22 @@
 
 #include "parse.h"
 
+typedef enum {
+    STOPPED,
+    TERM,
+    BG,
+    FG,
+} JobStatus;
+
+typedef struct {
+    char* name;
+    pid_t* pids;
+    unsigned int npids;
+    pid_t pgid;
+    JobStatus status;
+} Job;
+
+Job* new_jobs();
 int is_builtin (char* cmd);
 const char *sigabbrev(unsigned int sig);
 void infile_redirect (char *infile);
