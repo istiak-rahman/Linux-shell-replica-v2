@@ -29,7 +29,8 @@ Job* new_jobs()
         jobs[i].pids = NULL;
         jobs[i].npids = 0;
         jobs[i].pgid = 0;
-        jobs[i].status = STOPPED;
+        jobs[i].nfinishedtasks = 0;
+        jobs[i].status = TERM;
     }
 
     return jobs;
@@ -93,73 +94,6 @@ void outfile_redirect (char *outfile)
     close(out_fd);
 }
 
-void builtin_kill (Task T)
-{
-    pid_t pid;
-    int sig;
-    
-    // no command line arguments are provided
-    if (T.argv[0] != NULL && T.argv[1] == NULL) {
-        printf("Usage: kill [-s <signal>] <pid> | %%<job> ...\n");
-    }
-    
-    // -l flag is specified
-    else if (T.argv[2] == NULL && strcmp(T.argv[1], "-l") == 0) {
-        int i;
-        for (i=0; i < 31; i++) {
-            printf("%2d) SIG%-14s%s\n", i+1, sigabbrev(i+1), strsignal(i+1));
-        }
-    }
-    
-    // no specific signal is provided using -s
-    else if (T.argv[2] == NULL && strcmp(T.argv[1], "-s") != 0) {
-        pid = atoi(T.argv[1]);
-        
-        if (kill(pid, SIGTERM) == -1) {
-            printf("Could not send SIGTERM to pid %d\n", pid);
-            exit(EXIT_FAILURE);
-        }
-        else {
-            printf("Signal SIGTERM was sent to pid %d\n", pid);
-        }
-    }
-    
-    // specific signal is provided using -s
-    else if (T.argv[2] != NULL && strcmp(T.argv[1], "-s") == 0) {
-        pid = atoi(T.argv[3]);
-        sig = atoi(T.argv[2]);
-        
-        // non-zero signals
-        if (sig != 0) {
-            if (kill(pid, sig) == -1) {
-                printf("Could not send signal %d to pid %d\n", sig, pid);
-                exit(EXIT_FAILURE);
-            }
-            
-            else {
-                printf("Signal SIG%s sent to pid %d\n", sigabbrev(sig), pid);
-            }
-          
-        }
-        // zero signal
-        else {
-            if (kill(pid, sig) == 0) {
-                printf("PID %d exists and is able to receive signals\n", pid);
-            }
-            else {
-                if (errno == ESRCH) {
-                    printf("PID %d does not exist\n", pid);
-                }
-                else if (errno == EPERM) {
-                    printf("PID %d exists, but we can't send it signals\n", pid);
-                }
-                else {
-                    printf("An invalid signal was specified\n");
-                }
-            }
-        }
-    }
-}
 
 void builtin_which (Task T, char *infile, char *outfile)
 {
@@ -219,10 +153,9 @@ void builtin_execute (Task T, char* infile, char *outfile)
     else if (!strcmp (T.cmd, "which")) {
         builtin_which(T, infile, outfile);
     }
-    else if (!strcmp (T.cmd, "kill")) {
-        builtin_kill(T);
-    }
     else {
         printf ("pssh: builtin command: %s (not implemented!)\n", T.cmd);
     }
 }
+
+

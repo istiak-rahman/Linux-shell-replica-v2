@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <readline/readline.h>
+#include <errno.h>
 
 #include "builtin.h"
 #include "parse.h"
@@ -17,8 +18,8 @@
 
 Job* J;
 int job_num = 0;
-int job_idx;
 int our_tty;
+
 
 void print_banner ()
 {
@@ -89,31 +90,7 @@ static int command_found (const char* cmd)
     return ret;
 }
 
-int find_availability() {
-    int i;
-    for (i=0; i<job_num; i++) {
-        if (J[i].name == NULL)
-            return i;
-    }
-
-    return job_num;
-}
-
-void remove_job(int k) {
-    if (J[k].name == NULL || J[k].pgid == 0) {
-        printf("Job %d not found.\n", k);
-    }
-
-    free(J[k].name);
-    free(J[k].pids);
-    J[k].pgid = 0;
-    J[k].npids = 0;
-    J[k].status = STOPPED;
-
-    job_num--;
-}
-
-void set_fg_pgrp(pid_t pgrp)
+void set_fg_pgrp(int pgrp)
 {
     void (*sav)(int sig);
 
@@ -125,43 +102,110 @@ void set_fg_pgrp(pid_t pgrp)
     signal(SIGTTOU, sav);
 }
 
+int find_availability() 
+{
+    int i;
+    for (i=0; i<job_num; i++) {
+        if (J[i].name == NULL && J[i].npids == 0)
+            return i;
+    }
+
+    return job_num - 1;
+}
+
+int find_job(pid_t chld)
+{
+    int i, j, index = -1;
+    for (i=0; i<job_num; i++) {
+        for (j=0; j<J[i].npids; j++) {
+            if (J[i].pids[j] == chld) {
+                index = i;
+                break;
+            }
+        }
+        if (index != -1) {
+            break;
+        }
+    }
+
+    return index;
+}
+
+void print_jobs() 
+{
+    if (getpgrp() != tcgetpgrp(STDOUT_FILENO)) {
+        // ensure shell is the fg group
+        set_fg_pgrp(0);
+    }
+
+    int i;
+    for (i=0; i<job_num; i++) {
+        if (J[i].name && J[i].pgid) {
+            char state[15];
+            if (J[i].status == FG || J[i].status == BG) {
+                strcpy(state, "running");
+            }
+            else if (J[i].status == STOPPED) {
+                strcpy(state, "stopped");
+            }
+            printf("[%d] + %s\t%s\n", i, state, J[i].name);
+        }
+    }
+}
+
+void remove_job(int k)
+{
+    // if (J[k].name == NULL && J[k].pgid == 0) {
+    //     printf("Job %d not found.\n", k);
+    //     return;
+    // }
+
+    free(J[k].name);
+    free(J[k].pids);
+
+    J[k].name = NULL;
+    J[k].pids = NULL;
+    J[k].pgid = 0;
+    J[k].npids = 0;
+    J[k].nfinishedtasks = 0;
+    J[k].status = TERM;
+
+    job_num--;
+}
+
+
 void handler(int sig)
 {
     pid_t chld;
-    int status, i;
+    int status, idx;
 
     switch(sig) {
     case SIGTTOU:
         while(tcgetpgrp(STDOUT_FILENO) != getpgrp())
             pause();
-
         break;
     case SIGCHLD:
-        while( (chld = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0 ) {
-            if (WIFSTOPPED(status)) {
+        while( (chld = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0 ) {
+            idx = find_job(chld);
+            if (WIFCONTINUED(status)) {
                 set_fg_pgrp(0);
-                printf("Parent: Child %d stopped! Continuing it!\n", chld);
-                set_fg_pgrp(getpgid(chld));
-                kill(chld, SIGCONT);
+                printf("[%d] + continued\t%s\n", idx, J[idx].name);
+                return;
+            } else if (WIFSTOPPED(status)) {
+                set_fg_pgrp(0);
+                printf("\n[%d] + suspended\t%s\n", idx, J[idx].name);
+                J[idx].status = STOPPED;
+                return;
             } else { // waited on terminated children
-                if (getpgrp() != tcgetpgrp(STDOUT_FILENO)) {
-                    // return the fg to the shell
-                    set_fg_pgrp(0);
+                set_fg_pgrp(0);
+                J[idx].nfinishedtasks++;
+                //printf("Job Index: %d   NPIDS: %d   Chld: %d\n", idx, J[idx].npids, chld);
+                if (J[idx].nfinishedtasks == J[idx].npids) {
+                    if (J[idx].status == BG) {
+                        printf("\n[%d] + done\t%s\n", idx, J[idx].name);
+                    }
+                    remove_job(idx);
                 }
-
-                if (J[job_num].status == BG) {
-                    printf("[%d] + done     %s\n", job_num, J[job_num].name);
-                    printf("\n");
-                }
-
-                printf("waitpid returned: %d\n", chld);
-
-                if (WIFEXITED(status)) {
-                    printf("Parent: Child %d has terminated with exit status %d\n", chld, WEXITSTATUS(status));
-                }
-
-                printf("Parent: Child %d has terminated\n", chld);
-                J[job_num].status = TERM;
             }
         }
 
@@ -169,6 +213,86 @@ void handler(int sig)
 
     default:
         break;
+    }
+
+}
+
+void builtin_kill (Task T)
+{
+    pid_t pid;
+    int sig, i, job_id, j;
+    int s_flag = 0;
+    int l_flag = 0;
+
+    // no command line arguments are provided
+    if (T.argv[0] != NULL && T.argv[1] == NULL) {
+        printf("Usage: kill [-s <signal>] <pid> | %%<job> ...\n");
+    }
+    // -l flag is specified
+    else if (T.argv[2] == NULL && strcmp(T.argv[1], "-l") == 0) {
+        l_flag = 1;
+        for (i=0; i < 31; i++) {
+            printf("%2d) SIG%-14s%s\n", i+1, sigabbrev(i+1), strsignal(i+1));
+        }
+    }
+    // no specific signal is provided using -s
+    else if (strcmp(T.argv[1], "-s")) {
+        sig = 15; // SIGTERM
+    }
+    // specific signal is provided using -s
+    else if (!strcmp(T.argv[1], "-s")) {
+        s_flag = 1;
+        sig = atoi(T.argv[2]);
+    }
+
+    for (i=1; T.argv[i] != NULL; i++) {
+        // kill specified job
+        if (T.argv[i][0] == '%') {
+            char* token = strtok(T.argv[i], "%");
+            job_id = atoi(token);
+            if (job_id < 0 || job_id > job_num) {
+                printf("pssh: invalid job number: [%d]\n", job_id);
+            }
+            else {
+                for (j=0; j<J[job_id].npids; j++) {
+                    if (kill(J[job_id].pids[j], sig) == -1) {
+                        printf("pssh: could not send SIG%s to job %d\n", sigabbrev(sig), job_id);
+                    }
+                }
+            }
+        }
+        // kill specified process
+        else {
+            if (!strcmp(T.argv[i], "-s") || l_flag || atoi(T.argv[i]) == sig)
+                continue;
+            
+            pid = atoi(T.argv[i]);
+            if (find_job(pid) == -1 && !l_flag && !s_flag) {
+                printf("pssh: invalid pid: [%d]\n", pid);
+            }
+            else if (sig == 0) {
+                if (kill(pid, sig) == 0) {
+                    printf("pssh: PID %d exists and is able to receive signals\n", pid);
+                }
+                else {
+                    if (errno == ESRCH) {
+                        printf("pssh: PID %d does not exist\n", pid);
+                    }
+                    else if (errno == EPERM) {
+                        printf("pssh: PID %d exists, but we can't send it signals\n", pid);
+                    }
+                    else {
+                        printf("pssh: an invalid signal was specified\n");
+                    }
+                }
+            }
+            else {
+                if (kill(pid, sig) == -1) {
+                    printf("pssh: could not send SIG%s to pid %d\n", sigabbrev(sig), pid);
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
     }
 }
 
@@ -182,6 +306,15 @@ void execute_tasks (Parse* P, char* cmdline)
     unsigned int t;
     int pipe_fd[P->ntasks-1][2]; // for pipe between each pair of tasks
     pid_t job_pids[P->ntasks];
+    int job_idx;
+    int via_bg_cmd = 0;
+
+    // install handlers
+    signal(SIGTTOU, handler);
+    signal(SIGCHLD, handler);
+    signal(SIGINT, handler);
+    signal(SIGTSTP, handler);
+    signal(SIGTTIN, handler);
     
     if (!isatty(STDOUT_FILENO)) {
         printf("STDOUT_FILENO is not a tty.\n");
@@ -189,16 +322,61 @@ void execute_tasks (Parse* P, char* cmdline)
     }
 
     our_tty = dup(STDOUT_FILENO);
+    job_num++;
+    job_idx = find_availability();
 
-    J[job_num].name = malloc(strlen(cmdline)+1);
-    J[job_num].pids = malloc(sizeof(int)*100);
-    strcpy(J[job_num].name, cmdline);
-//    printf("FG Process Group: %d\n", tcgetpgrp(STDOUT_FILENO));
-//    printf("Parent Process Group: %d\n", getpgrp());
-//    printf("-----\n");
+    J[job_idx].name = malloc(strlen(cmdline)+1);
+    J[job_idx].pids = malloc(sizeof(int)*100);
+    strcpy(J[job_idx].name, cmdline);
+    J[job_idx].nfinishedtasks = 0;
+
     for (t = 0; t < P->ntasks; t++) {
         if (is_builtin (P->tasks[t].cmd)) {
-            builtin_execute (P->tasks[t], P->infile, P->outfile);
+            Task T = P->tasks[t];
+            if (!strcmp(T.cmd, "jobs")) {
+                print_jobs();
+                remove_job(job_idx);
+                return;
+            }
+            else if (!strcmp(P->tasks[t].cmd, "kill")) {
+                builtin_kill(T);
+                remove_job(job_idx);
+                return;
+            }
+            else if (!strcmp(T.cmd, "fg") || !strcmp(T.cmd, "bg")) {
+                if (T.argv[0] != NULL && T.argv[1] == NULL) {
+                    printf("Usage: %s %%<job number>\n", T.cmd);
+                }
+                else {
+                    via_bg_cmd = 1;
+                    char* token = strtok(cmdline, "%");
+                    token = strtok(NULL, "%");
+                    int num = atoi(token);
+                    //set_fg_pgrp(0);
+                    if (!J[num].name) {
+                        printf("pssh: invalid job number: [%d]\n", num);
+                    }
+                    else if (!strcmp(T.cmd, "fg")) {
+                        P->background = 0;
+                        J[num].status = FG;
+                        set_fg_pgrp(J[num].pgid);
+                        kill(-J[num].pgid, SIGCONT);
+                        remove_job(job_idx);
+                        return;
+                    }
+                    else {
+                        P->background = 1;
+                        J[num].status = BG;
+                        set_fg_pgrp(0);
+                        kill(-J[num].pgid, SIGCONT);
+                        remove_job(job_idx);
+                        return;
+                    }
+                }
+            }
+            else {
+                builtin_execute (P->tasks[t], P->infile, P->outfile);
+            }
         }
         else if (command_found (P->tasks[t].cmd)) {
             //printf ("pssh: found but can't exec: %s\n", P->tasks[t].cmd);
@@ -213,33 +391,28 @@ void execute_tasks (Parse* P, char* cmdline)
             job_pids[t] = fork();
             setpgid(job_pids[t], job_pids[0]); // place process into process group
 
-            J[job_num].pids[J[job_num].npids] = job_pids[t];
-            printf("calling process pid: %d\n", J[job_num].pids[J[job_num].npids]);
-            J[job_num].npids++; // increment pid counter for job
+            J[job_idx].pids[J[job_idx].npids] = job_pids[t];
+            J[job_idx].npids++;
             
             if (P->background == 0) {
-                // sav = signal(SIGTTOU, SIG_IGN);
-                // tcsetpgrp(STDOUT_FILENO, getpgrp());
-                // signal(SIGTTOU, sav);
                 set_fg_pgrp(job_pids[0]);
             }
 
             if (t == 0) {
-                J[job_num].pgid = job_pids[0]; // place pgrp id into Jobs array
+                J[job_idx].pgid = job_pids[0]; // place pgrp id into Jobs array
                 if (P->background)
-                    J[job_num].status = BG;
+                    J[job_idx].status = BG;
                 else
-                    J[job_num].status = FG;
-                //printf("status: %d\n", J[job_num].status);
+                    J[job_idx].status = FG;
             }
-
+            
             if (job_pids[t] == -1) {
                 perror("error -- failed to fork()\n");
                 exit(EXIT_FAILURE);
             }
             else if (job_pids[t] == 0) {
                 close(our_tty);
-
+                
                 if (P->infile) {
                     infile_redirect(P->infile);
                 }
@@ -288,28 +461,25 @@ void execute_tasks (Parse* P, char* cmdline)
         }
     }
 
-    // install handlers
-    signal(SIGTTOU, handler);
-    signal(SIGCHLD, handler);
-    // signal(SIGTERM, handler);
-    // signal(SIGTSTP, handler);
-    // signal(SIGINT, handler);
-
     // check that all child processes have been terminated
-    if (P->background == 0) {
-        for (t=0; t<P->ntasks; t++)
-            while (!kill(job_pids[t], 0))
+    if (!P->background) {
+        for (t=0; t<P->ntasks; t++) {
+            while (!kill(job_pids[t], 0) && J[job_idx].status == FG)
                 pause();
+        }
     }
     else {
-        printf("[%d] ", job_num);
-        for (t=0; t<J[job_num].npids; t++) {
-            printf("%d ", J[job_num].pids[t]);
+        if (!via_bg_cmd) {
+            printf("[%d] ", job_idx);
+            for (t=0; t<J[job_idx].npids; t++) {
+                printf("%d ", J[job_idx].pids[t]);
+            }
+            printf("\n");
         }
-        printf("\n");
     }
 
-    job_num++;
+    printf(" \n");
+
     close(our_tty);
 }
 
@@ -325,6 +495,7 @@ int main (int argc, char** argv)
     char *prompt;
 
     while (1) {
+        fflush(stdout);
         prompt = build_prompt();
         cmdline = readline (prompt);
 
@@ -356,4 +527,3 @@ int main (int argc, char** argv)
         free(prompt);
     }
 }
-
