@@ -1,10 +1,13 @@
-How To Compile & Run
+# How To Compile & Run
 ====================
+
 ~/src/pssh$ make
+
   gcc -g -Wall -c builtin.c -o builtin.o
   gcc -g -Wall -c parse.c -o parse.o
   gcc -g -Wall -c pssh.c -o pssh.o
   gcc builtin.o parse.o pssh.o -Wall -lreadline -o pssh
+  
 ~/src/pssh$ ./pssh
 
 Description
