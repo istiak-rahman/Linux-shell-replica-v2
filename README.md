@@ -1,5 +1,4 @@
 # How To Compile & Run
-====================
 
 ```~/src/pssh$ make```
 
